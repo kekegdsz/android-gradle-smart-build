@@ -1,0 +1,233 @@
+// build-optimization.gradle
+// =======================================================
+//  全局一次性状态（Root Only）
+// =======================================================
+ext._gitHeadChanged = false
+ext._gitBranchChanged = false
+ext._gitStateInited = false
+ext._taskGraphInstalled = false
+
+
+// =======================================================
+//  Git 状态初始化（只执行一次）
+// =======================================================
+
+def initGitStateOnce = {
+    if (rootProject.ext._gitStateInited) return
+    rootProject.ext._gitStateInited = true
+
+    try {
+        def p = ["bash", "-c", "git rev-parse HEAD"].execute()
+        p.waitFor()
+        def currentHead = p.in.text.trim()
+
+        def recordFile = new File(rootProject.buildDir, "last_git_head.txt")
+        def lastHead = recordFile.exists() ? recordFile.text.trim() : ""
+
+        recordFile.parentFile.mkdirs()
+        recordFile.text = currentHead
+
+        rootProject.ext._gitHeadChanged = lastHead && lastHead != currentHead
+    } catch (Throwable ignored) {
+        rootProject.ext._gitHeadChanged = true
+    }
+
+    try {
+        def p = ["bash", "-c", "git rev-parse --abbrev-ref HEAD"].execute()
+        p.waitFor()
+        def currentBranch = p.in.text.trim()
+
+        def recordFile = new File(rootProject.buildDir, "last_git_branch.txt")
+        def lastBranch = recordFile.exists() ? recordFile.text.trim() : ""
+
+        recordFile.parentFile.mkdirs()
+        recordFile.text = currentBranch
+
+        rootProject.ext._gitBranchChanged = lastBranch && lastBranch != currentBranch
+    } catch (Throwable ignored) {
+        rootProject.ext._gitBranchChanged = true
+    }
+}
+
+
+// =======================================================
+//  全工程通用编译优化
+// =======================================================
+
+allprojects { Project p ->
+
+    afterEvaluate {
+
+        // ---------- Kotlin ----------
+        def kotlinTaskClassNames = [
+            'org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile',
+            'org.jetbrains.kotlin.gradle.tasks.KotlinCompile'
+        ]
+
+        Class kotlinCompileClass = null
+        for (name in kotlinTaskClassNames) {
+            try {
+                kotlinCompileClass = Class.forName(name)
+                break
+            } catch (Throwable ignored) {}
+        }
+
+        if (kotlinCompileClass != null) {
+            tasks.withType(kotlinCompileClass).configureEach { task ->
+                task.kotlinOptions {
+                    jvmTarget = "1.8"
+                    freeCompilerArgs += ["-Xjsr305=strict"]
+                    allWarningsAsErrors = false
+                    suppressWarnings = true
+                }
+                task.incremental = true
+            }
+        }
+
+        // ---------- Java ----------
+        tasks.withType(JavaCompile).configureEach {
+            options.incremental = true
+            options.fork = true
+            options.forkOptions.memoryMaximumSize = "1g"
+        }
+
+        // ---------- Test ----------
+        tasks.withType(Test).configureEach {
+            maxParallelForks = Runtime.runtime.availableProcessors().intdiv(2) ?: 1
+            forkEvery = 100
+        }
+
+        // ---------- Android ----------
+        if (plugins.hasPlugin('com.android.application') ||
+            plugins.hasPlugin('com.android.library')) {
+
+            android {
+                aaptOptions {
+                    cruncherEnabled = false
+                }
+            }
+        }
+    }
+}
+
+
+// =======================================================
+//  Root Project：智能任务裁剪（Fail-Safe）
+// =======================================================
+
+if (project == rootProject && !ext._taskGraphInstalled) {
+    ext._taskGraphInstalled = true
+
+    def trimFailFlagFile = new File(rootProject.buildDir, "last_trim_failed.flag")
+
+    gradle.taskGraph.whenReady { graph ->
+
+        initGitStateOnce()
+
+        if (!graph.allTasks.any { it.name.startsWith("assemble") }) return
+
+        def lastTrimFailed = trimFailFlagFile.exists()
+
+        def allowTaskTrim =
+            !lastTrimFailed &&
+                !ext._gitHeadChanged &&
+                !ext._gitBranchChanged
+
+        println "\n🧠 构建策略判断："
+        println "  Git HEAD 变化: ${ext._gitHeadChanged}"
+        println "  Git 分支变化: ${ext._gitBranchChanged}"
+        println "  上一次裁剪失败: ${lastTrimFailed}"
+        println "  是否允许裁剪: ${allowTaskTrim}\n"
+
+        if (!allowTaskTrim) {
+            println "🚨 使用全量编译策略\n"
+            return
+        }
+
+        // 先假设裁剪会失败，成功后再清除
+        trimFailFlagFile.parentFile.mkdirs()
+        trimFailFlagFile.text = "failed"
+
+        // ---------- 跳过无关任务 ----------
+        def skipTasks = [
+            "lint",
+            "test",
+            "connectedAndroidTest",
+            "kaptTestKotlin",
+            "kaptAndroidTestKotlin",
+            "testDebugUnitTest"
+        ]
+
+        graph.allTasks.each { task ->
+            skipTasks.each { skip ->
+                if (task.name.contains(skip)) {
+                    task.enabled = false
+                }
+            }
+        }
+
+        // ---------- Git 变更模块 ----------
+        def changedModules = [] as Set<String>
+
+        def processChangedFiles = { String filePath ->
+            if (!filePath.contains("/")) return
+            def parts = filePath.split("/")
+            def moduleParts = []
+            for (part in parts) {
+                if (part == "src") break
+                moduleParts << part
+            }
+            if (!moduleParts.isEmpty()) {
+                changedModules << ":" + moduleParts.join(":")
+            }
+        }
+
+        [
+            "git diff --name-only HEAD~1..HEAD",
+            "git diff --name-only",
+            "git diff --name-only --cached"
+        ].each { cmd ->
+            try {
+                def p = ["bash", "-c", cmd].execute()
+                p.waitFor()
+                p.in.text.readLines().each(processChangedFiles)
+            } catch (ignored) {}
+        }
+
+        println "📌 Git 变更模块："
+        changedModules.each { println "  $it" }
+        println ""
+
+        // ---------- 编译任务裁剪 ----------
+        graph.allTasks.each { task ->
+            if (!task.path.contains(":compileDebug")
+                && !task.path.contains(":kaptDebug")
+                && !task.path.contains(":kspDebug")) return
+
+            def modulePath = task.path.substring(0, task.path.lastIndexOf(":"))
+            def isChanged = changedModules.any { modulePath.startsWith(it) }
+
+            if (!isChanged) {
+                task.enabled = false
+            } else {
+                println "✅ 编译模块: ${task.path}"
+            }
+        }
+    }
+
+    // ===================================================
+    //  构建完成回调（决定是否回退）
+    // ===================================================
+
+    gradle.buildFinished { result ->
+        def flag = new File(rootProject.buildDir, "last_trim_failed.flag")
+        if (result.failure == null) {
+            if (flag.exists()) {
+                flag.delete()
+                println "\n✅ 构建成功，清除裁剪失败标记"
+            }
+        } else {
+            println "\n❌ 构建失败，下次将自动全量编译"
+        }
+    }
+}
