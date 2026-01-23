@@ -60,7 +60,7 @@ moduleA/src/...
 ### 1️⃣ 拷贝脚本
 将 `build-optimization.gradle` 拷贝到项目根目录（与 `settings.gradle` 同级）：
 
-
+```text
 project-root/
 
 ├── build-optimization.gradle
@@ -70,14 +70,15 @@ project-root/
 ├── app/
 
 └── ...
-
+```
 
 ### 2️⃣ 在 Root build.gradle 引入
 
 
 groovy
-
+```text
 apply from: rootProject.file("build-optimization.gradle")
+```
 
 
 ⚠️ **确保路径正确，否则 Gradle 无法加载脚本。**
