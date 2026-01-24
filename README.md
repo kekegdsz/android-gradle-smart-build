@@ -2,96 +2,92 @@
 
 [中文文档](https://github.com/kekegdsz/android-gradle-smart-build/blob/main/README_CN.md)
 
-🚀 **一个安全、可回退的 Android Gradle 构建裁剪方案**  
-基于 Git Diff + TaskGraph 的智能编译加速，**裁剪失败自动回退全量编译**，适合中大型 Android 工程 /本地 Server 构建，项目编译从10分钟到10秒。
+# 🚀 A Safe, Rollback-Safe Android Gradle Build Pruning Solution
+Based on Git Diff + TaskGraph for intelligent compilation acceleration. **Automatically falls back to a full build if pruning fails**. Suitable for medium-to-large Android projects / local or CI server builds. Reduces project build time from 10 minutes to 10 seconds.
 
 ---
 
-## ✨ 特性亮点
+## ✨ Key Features
 
-- **Git Diff 驱动的模块级裁剪**
-- **Fail-Safe 机制**：裁剪失败 → 下次自动全量编译
-- **零侵入**：无需改任何模块源码
-- **显著缩短 构建时间**
-- 支持 Kotlin / Java / KAPT / KSP
-- 适用于多 Module Android 工程
-
----
-
-## 📦 适用场景
-
-✅ **推荐使用**
-
-- 多 Module Android 工程
-- local or Server 构建（Jenkins / GitLab CI / GitHub Actions）
-- 日常 Debug / Dev 构建
-- 构建时间 > 5 分钟的项目
-
-❌ **不推荐**
-
-- 单模块或极小工程
-- 非 Git 管理项目
-- 强依赖运行期反射 / 动态代码生成的工程（需谨慎）
+- **Git Diff-driven module-level pruning**
+- **Fail-Safe Mechanism**: If pruning fails → automatically triggers a full build next time
+- **Zero Intrusive**: No need to modify any module source code
+- **Significantly reduces build time**
+- Supports Kotlin / Java / KAPT / KSP
+- Suitable for multi-module Android projects
 
 ---
 
-## 🧠 工作原理概览
+## 📦 Use Cases
 
-### 1️⃣ Git 状态感知
+✅ **Recommended for**
 
-- 记录上一次：
+- Multi-module Android projects
+- Local or CI server builds (Jenkins / GitLab CI / GitHub Actions)
+- Daily debug / development builds
+- Projects with build times > 5 minutes
+
+❌ **Not recommended for**
+
+- Single-module or very small projects
+- Projects not managed by Git
+- Projects heavily relying on runtime reflection / dynamic code generation (use with caution)
+
+---
+
+## 🧠 How It Works
+
+### 1️⃣ Git State Awareness
+
+- Records the previous:
   - Git HEAD
-  - Git 分支
-- 发生变化 → 自动全量编译（保证安全）
+  - Git branch
+- Automatically triggers a full build if any change is detected (ensures safety)
 
-### 2️⃣ Git Diff → 模块映射
+### 2️⃣ Git Diff → Module Mapping
 
-```text
+text
 git diff --name-only
-  ↓
+↓
 moduleA/src/...
-  ↓
-:moduleA
+↓
 
-```
 
-# Android Gradle 构建优化脚本使用说明
 
-## 🚀 快速接入
+---
 
-### 1️⃣ 拷贝脚本
-将 `build-optimization.gradle` 拷贝到项目根目录（与 `settings.gradle` 同级）：
+# Android Gradle Build Optimization Script - Usage Guide
 
-```text
+## 🚀 Quick Integration
+
+### 1️⃣ Copy the Script
+Copy the `build-optimization.gradle` file to your project root directory (at the same level as `settings.gradle`):
+
+text
 project-root/
-
 ├── build-optimization.gradle
-
 ├── settings.gradle
-
 ├── app/
-
 └── ...
-```
 
-### 2️⃣ 在 Root build.gradle 引入
 
+### 2️⃣ Apply in Root build.gradle
+
+Add the following line to your root `build.gradle` file:
 
 groovy
-```text
 apply from: rootProject.file("build-optimization.gradle")
-```
 
 
-⚠️ **确保路径正确，否则 Gradle 无法加载脚本。**
+⚠️ **Ensure the path is correct, otherwise Gradle will fail to load the script.**
 
-## 📂 生成的缓存文件说明
+## 📂 Generated Cache Files
 
-| 文件 | 作用 |
-|------|------|
-| `build/last_git_head.txt` | 记录上一次 Git HEAD，用于判断代码是否变化 |
-| `build/last_git_branch.txt` | 记录上一次 Git 分支，用于判断分支是否切换 |
-| `build/last_trim_failed.flag` | 记录上一次裁剪构建是否失败，若存在则下次自动全量编译 |
+| File | Purpose |
+|------|---------|
+| `build/last_git_head.txt` | Records the previous Git HEAD to detect code changes |
+| `build/last_git_branch.txt` | Records the previous Git branch to detect branch switches |
+| `build/last_trim_failed.flag` | Flag indicating if the previous pruned build failed. If present, a full build is triggered automatically next time. |
 
-## 💡 提示
-这些文件可安全删除，脚本会在下一次构建时重新生成，不影响功能。
+## 💡 Tip
+These cache files can be safely deleted. The script will regenerate them during the next build without affecting functionality.
