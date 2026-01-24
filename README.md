@@ -78,6 +78,7 @@ groovy
 apply from: rootProject.file("build-optimization.gradle")
 
 
+g
 ⚠️ **Ensure the path is correct, otherwise Gradle will fail to load the script.**
 
 ## 📂 Generated Cache Files
