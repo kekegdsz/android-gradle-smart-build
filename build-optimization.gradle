@@ -1,6 +1,6 @@
 // build-optimization.gradle
 // =======================================================
-//  全局一次性状态（Root Only）
+//  Global One-time State (Root Only)
 // =======================================================
 ext._gitHeadChanged = false
 ext._gitBranchChanged = false
@@ -9,7 +9,7 @@ ext._taskGraphInstalled = false
 
 
 // =======================================================
-//  Git 状态初始化（只执行一次）
+//  Git State Initialization (Execute Only Once)
 // =======================================================
 
 def initGitStateOnce = {
@@ -51,7 +51,7 @@ def initGitStateOnce = {
 
 
 // =======================================================
-//  全工程通用编译优化
+//  Project-wide Build Optimization
 // =======================================================
 
 allprojects { Project p ->
@@ -60,8 +60,8 @@ allprojects { Project p ->
 
         // ---------- Kotlin ----------
         def kotlinTaskClassNames = [
-            'org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile',
-            'org.jetbrains.kotlin.gradle.tasks.KotlinCompile'
+                'org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile',
+                'org.jetbrains.kotlin.gradle.tasks.KotlinCompile'
         ]
 
         Class kotlinCompileClass = null
@@ -99,7 +99,7 @@ allprojects { Project p ->
 
         // ---------- Android ----------
         if (plugins.hasPlugin('com.android.application') ||
-            plugins.hasPlugin('com.android.library')) {
+                plugins.hasPlugin('com.android.library')) {
 
             android {
                 aaptOptions {
@@ -112,7 +112,7 @@ allprojects { Project p ->
 
 
 // =======================================================
-//  Root Project：智能任务裁剪（Fail-Safe）
+//  Root Project: Intelligent Task Pruning (Fail-Safe)
 // =======================================================
 
 if (project == rootProject && !ext._taskGraphInstalled) {
@@ -129,33 +129,33 @@ if (project == rootProject && !ext._taskGraphInstalled) {
         def lastTrimFailed = trimFailFlagFile.exists()
 
         def allowTaskTrim =
-            !lastTrimFailed &&
-                !ext._gitHeadChanged &&
-                !ext._gitBranchChanged
+                !lastTrimFailed &&
+                        !ext._gitHeadChanged &&
+                        !ext._gitBranchChanged
 
-        println "\n🧠 构建策略判断："
-        println "  Git HEAD 变化: ${ext._gitHeadChanged}"
-        println "  Git 分支变化: ${ext._gitBranchChanged}"
-        println "  上一次裁剪失败: ${lastTrimFailed}"
-        println "  是否允许裁剪: ${allowTaskTrim}\n"
+        println "\n🧠 Build Strategy Evaluation:"
+        println "  Git HEAD Changed: ${ext._gitHeadChanged}"
+        println "  Git Branch Changed: ${ext._gitBranchChanged}"
+        println "  Last Pruning Failed: ${lastTrimFailed}"
+        println "  Allow Task Pruning: ${allowTaskTrim}\n"
 
         if (!allowTaskTrim) {
-            println "🚨 使用全量编译策略\n"
+            println "🚨 Using Full Build Strategy\n"
             return
         }
 
-        // 先假设裁剪会失败，成功后再清除
+        // Assume pruning will fail initially, clear on success
         trimFailFlagFile.parentFile.mkdirs()
         trimFailFlagFile.text = "failed"
 
-        // ---------- 跳过无关任务 ----------
+        // ---------- Skip Unrelated Tasks ----------
         def skipTasks = [
-            "lint",
-            "test",
-            "connectedAndroidTest",
-            "kaptTestKotlin",
-            "kaptAndroidTestKotlin",
-            "testDebugUnitTest"
+                "lint",
+                "test",
+                "connectedAndroidTest",
+                "kaptTestKotlin",
+                "kaptAndroidTestKotlin",
+                "testDebugUnitTest"
         ]
 
         graph.allTasks.each { task ->
@@ -166,7 +166,7 @@ if (project == rootProject && !ext._taskGraphInstalled) {
             }
         }
 
-        // ---------- Git 变更模块 ----------
+        // ---------- Git Changed Modules ----------
         def changedModules = [] as Set<String>
 
         def processChangedFiles = { String filePath ->
@@ -183,9 +183,9 @@ if (project == rootProject && !ext._taskGraphInstalled) {
         }
 
         [
-            "git diff --name-only HEAD~1..HEAD",
-            "git diff --name-only",
-            "git diff --name-only --cached"
+                "git diff --name-only HEAD~1..HEAD",
+                "git diff --name-only",
+                "git diff --name-only --cached"
         ].each { cmd ->
             try {
                 def p = ["bash", "-c", cmd].execute()
@@ -194,15 +194,15 @@ if (project == rootProject && !ext._taskGraphInstalled) {
             } catch (ignored) {}
         }
 
-        println "📌 Git 变更模块："
+        println "📌 Git Changed Modules:"
         changedModules.each { println "  $it" }
         println ""
 
-        // ---------- 编译任务裁剪 ----------
+        // ---------- Compilation Task Pruning ----------
         graph.allTasks.each { task ->
             if (!task.path.contains(":compileDebug")
-                && !task.path.contains(":kaptDebug")
-                && !task.path.contains(":kspDebug")) return
+                    && !task.path.contains(":kaptDebug")
+                    && !task.path.contains(":kspDebug")) return
 
             def modulePath = task.path.substring(0, task.path.lastIndexOf(":"))
             def isChanged = changedModules.any { modulePath.startsWith(it) }
@@ -210,13 +210,13 @@ if (project == rootProject && !ext._taskGraphInstalled) {
             if (!isChanged) {
                 task.enabled = false
             } else {
-                println "✅ 编译模块: ${task.path}"
+                println "✅ Compiling Module: ${task.path}"
             }
         }
     }
 
     // ===================================================
-    //  构建完成回调（决定是否回退）
+    //  Build Finished Callback (Determine Rollback)
     // ===================================================
 
     gradle.buildFinished { result ->
@@ -224,10 +224,10 @@ if (project == rootProject && !ext._taskGraphInstalled) {
         if (result.failure == null) {
             if (flag.exists()) {
                 flag.delete()
-                println "\n✅ 构建成功，清除裁剪失败标记"
+                println "\n✅ Build successful, pruning failure marker cleared"
             }
         } else {
-            println "\n❌ 构建失败，下次将自动全量编译"
+            println "\n❌ Build failed, will use full compilation next time"
         }
     }
 }

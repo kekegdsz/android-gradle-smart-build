@@ -1,6 +1,6 @@
 # Android Gradle Smart Build Optimization
 
-[中文文档](https://github.com/kekegdsz/android-gradle-smart-build/blob/main/README_CN.md)
+[English](https://github.com/kekegdsz/android-gradle-smart-build/blob/main/README.md)
 🚀 **一个安全、可回退的 Android Gradle 构建裁剪方案**  
 基于 Git Diff + TaskGraph 的智能编译加速，**裁剪失败自动回退全量编译**，适合中大型 Android 工程 /本地 Server 构建，项目编译从十分钟到10秒。
 
@@ -39,8 +39,8 @@
 ### 1️⃣ Git 状态感知
 
 - 记录上一次：
-  - Git HEAD
-  - Git 分支
+    - Git HEAD
+    - Git 分支
 - 发生变化 → 自动全量编译（保证安全）
 
 ### 2️⃣ Git Diff → 模块映射
