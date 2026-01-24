@@ -70,7 +70,6 @@ project-root/
 └── ...
 ```
 
-
 ### 2️⃣ Apply in Root build.gradle
 
 Add the following line to your root `build.gradle` file:
