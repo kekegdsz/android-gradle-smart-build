@@ -46,15 +46,14 @@ Based on Git Diff + TaskGraph for intelligent compilation acceleration. **Automa
 
 ### 2️⃣ Git Diff → Module Mapping
 
-text
+```text
 git diff --name-only
-↓
+  ↓
 moduleA/src/...
-↓
+  ↓
+:moduleA
 
-
-
----
+```
 
 # Android Gradle Build Optimization Script - Usage Guide
 
@@ -63,12 +62,13 @@ moduleA/src/...
 ### 1️⃣ Copy the Script
 Copy the `build-optimization.gradle` file to your project root directory (at the same level as `settings.gradle`):
 
-text
+```text
 project-root/
 ├── build-optimization.gradle
 ├── settings.gradle
 ├── app/
 └── ...
+```
 
 
 ### 2️⃣ Apply in Root build.gradle
