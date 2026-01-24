@@ -2,7 +2,7 @@
 
 [中文文档](https://github.com/kekegdsz/android-gradle-smart-build/blob/main/README_CN.md)
 🚀 **一个安全、可回退的 Android Gradle 构建裁剪方案**  
-基于 Git Diff + TaskGraph 的智能编译加速，**裁剪失败自动回退全量编译**，适合中大型 Android 工程 /本地 Server 构建，项目编译从十分钟到10秒。
+基于 Git Diff + TaskGraph 的智能编译加速，**裁剪失败自动回退全量编译**，适合中大型 Android 工程 /本地 Server 构建，项目编译从10分钟到10秒。
 
 ---
 
