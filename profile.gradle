@@ -1,0 +1,276 @@
+// profile.gradle - Optimized Build Time Analysis Script (Supports Top 20 by Category)
+
+// Using simple variable definitions
+ext {
+    buildStartTime = System.currentTimeMillis()
+    taskTimings = [:]
+    currentTaskStarts = [:]
+}
+
+// Simple task execution listener
+gradle.taskGraph.beforeTask { task ->
+    currentTaskStarts[task.path] = System.currentTimeMillis()
+}
+
+gradle.taskGraph.afterTask { task, taskState ->
+    def startTime = currentTaskStarts[task.path]
+    if (startTime) {
+        def duration = System.currentTimeMillis() - startTime
+        if (duration > 5) { // Only record tasks taking longer than 5ms
+            taskTimings[task.path] = duration
+        }
+        currentTaskStarts.remove(task.path)
+    }
+}
+
+// Report generation after build completion
+gradle.buildFinished { result ->
+    def totalTime = System.currentTimeMillis() - buildStartTime
+
+    println "\n" + "="*60
+    println "📊 Build Time Analysis Report"
+    println "="*60
+    println "📦 Project: ${project.name}"
+    println "⏰ Total Duration: ${totalTime}ms (${String.format("%.2f", totalTime/1000.0)} seconds)"
+    println "📁 Build Result: ${result.failure ? 'FAILED ❌' : 'SUCCESS ✅'}"
+    println "📊 Task Statistics: ${gradle.taskGraph.allTasks.size()} tasks total, ${taskTimings.size()} tasks with recorded duration"
+    println "-"*60
+
+    if (result.failure) {
+        println "💥 Build Failed: ${result.failure.message}"
+    }
+
+    // Sorted list of tasks by duration
+    if (taskTimings && !taskTimings.isEmpty()) {
+        println "📈 Global Task Duration Ranking (Top 20):"
+        println "-"*60
+
+        def sortedTasks = taskTimings.sort { -it.value }
+        def count = 0
+
+        sortedTasks.take(20).each { taskPath, duration ->
+            def emoji = getSimpleEmoji(duration)
+            def shortPath = abbreviatePath(taskPath)
+            println "  ${emoji} ${shortPath.padRight(55)} ${String.format("%5d", duration)}ms"
+        }
+
+        // Categorized statistics
+        def categories = categorizeTasksSimple(taskTimings)
+        println "\n🔍 Task Category Statistics:"
+        println "-"*60
+
+        categories.each { category, tasks ->
+            if (tasks && !tasks.isEmpty()) {
+                def totalTimeCat = tasks.sum { it.value } ?: 0
+                def avgTime = totalTimeCat / tasks.size()
+                def percentage = (totalTimeCat / totalTime * 100).round(1)
+                println "  ${category.padRight(10)}: ${tasks.size()} tasks, Total Duration ${totalTimeCat}ms, Average ${avgTime.round()}ms, Proportion ${percentage}%"
+            }
+        }
+
+        // Specifically show detailed Top 20 for Resources and Code Generation categories
+        showCategoryTop20("Resources", categories, taskTimings)
+        showCategoryTop20("Code Generation", categories, taskTimings)
+
+    } else {
+        println "💡 No significant task durations recorded (likely an incremental build)"
+    }
+
+    // Simple performance suggestions
+    println "\n💡 Performance Observations:"
+    println "-"*60
+    generateSimpleSuggestions(taskTimings, totalTime, result)
+
+    println "="*60
+
+    // Save detailed report
+    saveDetailedReport(totalTime, result, taskTimings)
+}
+
+// Display Top 20 tasks for a specific category
+def showCategoryTop20(categoryName, categories, allTasks) {
+    def categoryTasks = categories[categoryName]
+    if (categoryTasks && !categoryTasks.isEmpty()) {
+        println "\n🔍 ${categoryName} Category Task Duration Ranking (Top 20):"
+        println "-"*60
+
+        // Sort by duration
+        def sortedCategoryTasks = categoryTasks.sort { -it.value }
+        def count = 0
+
+        sortedCategoryTasks.take(20).each { task ->
+            def duration = task.value
+            def emoji = getSimpleEmoji(duration)
+            def shortPath = abbreviatePath(task.taskPath)
+            println "  ${emoji} ${shortPath.padRight(55)} ${String.format("%5d", duration)}ms"
+
+            count++
+        }
+
+        if (count == 0) {
+            println "  No time-consuming tasks in the ${categoryName} category for now"
+        }
+    }
+}
+
+// Simplified task categorization
+def categorizeTasksSimple(tasks) {
+    def categories = [
+            'Compilation': [],
+            'Resources': [],
+            'Code Generation': [],
+            'Packaging': [],
+            'Verification': [],
+            'Other': []
+    ]
+
+    tasks.each { taskPath, duration ->
+        def category = getSimpleCategory(taskPath)
+        if (categories[category] != null) {
+            categories[category] << [taskPath: taskPath, value: duration]
+        } else {
+            categories['Other'] << [taskPath: taskPath, value: duration]
+        }
+    }
+
+    return categories
+}
+
+// Simplified categorization logic
+def getSimpleCategory(taskPath) {
+    if (taskPath.contains('compile') || taskPath.contains('Compile')) return 'Compilation'
+    if (taskPath.contains('kapt') || taskPath.contains('Kapt') || taskPath.contains('ksp') || taskPath.contains('Ksp')) return 'Code Generation'
+    if (taskPath.contains('merge') || taskPath.contains('process') || taskPath.contains('Merge') || taskPath.contains('Process')) return 'Resources'
+    if (taskPath.contains('package') || taskPath.contains('bundle') || taskPath.contains('assemble') ||
+            taskPath.contains('Package') || taskPath.contains('Bundle') || taskPath.contains('Assemble')) return 'Packaging'
+    if (taskPath.contains('lint') || taskPath.contains('check') || taskPath.contains('test') ||
+            taskPath.contains('Lint') || taskPath.contains('Check') || taskPath.contains('Test')) return 'Verification'
+    return 'Other'
+}
+
+// Simplified emoji
+def getSimpleEmoji(duration) {
+    if (duration > 10000) return "🐌🐌"
+    if (duration > 5000) return "🐌"
+    if (duration > 2000) return "🐢"
+    if (duration > 1000) return "🚶"
+    if (duration > 500) return "🏃"
+    if (duration > 100) return "⚡"
+    return "💫"
+}
+
+// Path abbreviation
+def abbreviatePath(taskPath) {
+    if (taskPath.length() > 55) {
+        return taskPath.substring(0, 52) + "..."
+    }
+    return taskPath
+}
+
+// Generate simple suggestions
+def generateSimpleSuggestions(tasks, totalTime, result) {
+    if (!tasks || tasks.isEmpty()) {
+        println "  ✅ Build speed is fast, likely an incremental build"
+        return
+    }
+
+    // Analyze the most time-consuming task types
+    def compileTasks = tasks.findAll { it.key.contains('compile') }
+    def resourceTasks = tasks.findAll { it.key.contains('merge') || it.key.contains('process') }
+    def codeGenTasks = tasks.findAll { it.key.contains('kapt') || it.key.contains('ksp') }
+
+    def compileTime = compileTasks.values().sum() ?: 0
+    def resourceTime = resourceTasks.values().sum() ?: 0
+    def codeGenTime = codeGenTasks.values().sum() ?: 0
+
+    if (compileTime > totalTime * 0.3) {
+        println "  📝 Compilation takes significant time (${(compileTime/totalTime*100).round(1)}%), consider checking dependencies"
+    }
+
+    if (resourceTime > totalTime * 0.2) {
+        println "  📁 Resource processing takes time (${(resourceTime/totalTime*100).round(1)}%), optimize resource files"
+    }
+
+    if (codeGenTime > totalTime * 0.2) {
+        println "  ⚡ Code generation takes time (${(codeGenTime/totalTime*100).round(1)}%), check annotation processors"
+    }
+
+    // Find the single most time-consuming task
+    def slowestTask = tasks.max { it.value }
+    if (slowestTask && slowestTask.value > 2000) {
+        println "  ⏱️ Most time-consuming task: ${abbreviatePath(slowestTask.key)} (${slowestTask.value}ms)"
+    }
+
+    // Check for particularly time-consuming resource or code generation tasks
+    def slowResourceTasks = resourceTasks.findAll { it.value > 500 }
+    def slowCodeGenTasks = codeGenTasks.findAll { it.value > 500 }
+
+    if (slowResourceTasks) {
+        println "  🔍 Found ${slowResourceTasks.size()} time-consuming resource tasks (>500ms)"
+    }
+
+    if (slowCodeGenTasks) {
+        println "  🔍 Found ${slowCodeGenTasks.size()} time-consuming code generation tasks (>500ms)"
+    }
+
+    if (compileTime + resourceTime + codeGenTime == 0) {
+        println "  ✅ Build performance is within acceptable range"
+    }
+}
+
+// Save detailed report
+def saveDetailedReport(totalTime, result, tasks) {
+    try {
+        def reportsDir = new File(project.buildDir, "reports")
+        if (!reportsDir.exists()) {
+            reportsDir.mkdirs()
+        }
+
+        def timestamp = new Date().format('yyyy-MM-dd-HH-mm-ss')
+        def reportFile = new File(reportsDir, "build-profile-${timestamp}.txt")
+
+        reportFile.withWriter { writer ->
+            writer.println("Build Time Report - ${new Date().format('yyyy-MM-dd HH:mm:ss')}")
+            writer.println("Project: ${project.name}")
+            writer.println("Total Duration: ${totalTime}ms")
+            writer.println("Result: ${result.failure ? 'FAILED' : 'SUCCESS'}")
+            writer.println("")
+
+            // Categorized statistics
+            def categories = categorizeTasksSimple(tasks)
+
+            writer.println("=== Category Statistics ===")
+            categories.each { category, categoryTasks ->
+                if (categoryTasks && !categoryTasks.isEmpty()) {
+                    def totalTimeCat = categoryTasks.sum { it.value } ?: 0
+                    def avgTime = totalTimeCat / categoryTasks.size()
+                    def percentage = (totalTimeCat / totalTime * 100).round(1)
+                    writer.println("${category}: ${categoryTasks.size()} tasks, Total Duration ${totalTimeCat}ms, Average ${avgTime.round()}ms, Proportion ${percentage}%")
+                }
+            }
+
+            writer.println("")
+            writer.println("=== Global Task Duration Ranking ===")
+            tasks.sort { -it.value }.each { task, time ->
+                writer.println("${task.padRight(70)} ${time}ms")
+            }
+
+            // Detailed task list for each category
+            categories.each { category, categoryTasks ->
+                if (categoryTasks && !categoryTasks.isEmpty()) {
+                    writer.println("")
+                    writer.println("=== ${category} Category Task Duration Ranking ===")
+                    categoryTasks.sort { -it.value }.each { task ->
+                        writer.println("${task.taskPath.padRight(70)} ${task.value}ms")
+                    }
+                }
+            }
+        }
+
+        println "📄 Detailed report saved: ${reportFile.absolutePath}"
+    } catch (Exception e) {
+        println "⚠️  Failed to save report: ${e.message}"
+    }
+}
+
+println "🔧 Build Analyzer Enabled - Supports Top 20 Display by Category"
