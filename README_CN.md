@@ -56,6 +56,17 @@ moduleA/src/...
 
 ```
 
+```text
+🧠 Build Strategy Evaluation:
+  Git HEAD Changed: false
+  Git Branch Changed: false
+  Last Pruning Failed: false
+  Allow Task Pruning: true
+
+📌 Git Changed Modules:
+  :component-biz:biz-debug-tool
+```
+
 # Android Gradle 构建优化脚本使用说明
 
 ## 🚀 快速接入
