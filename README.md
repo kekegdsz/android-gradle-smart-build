@@ -55,6 +55,18 @@ moduleA/src/...
 
 ```
 
+```text
+🧠 Build Strategy Evaluation:
+  Git HEAD Changed: false
+  Git Branch Changed: false
+  Last Pruning Failed: false
+  Allow Task Pruning: true
+
+📌 Git Changed Modules:
+  :component-biz:biz-debug-tool
+```
+
+
 # Android Gradle Build Optimization Script - Usage Guide
 
 ## 🚀 Quick Integration
