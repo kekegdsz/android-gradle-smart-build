@@ -123,3 +123,6 @@ limitations under the License.
 
 ```
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=kekegdsz/android-gradle-smart-build&type=date&legend=top-left)](https://www.star-history.com/#kekegdsz/android-gradle-smart-build&type=date&legend=top-left)
