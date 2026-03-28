@@ -15,6 +15,30 @@ Based on Git Diff + TaskGraph for intelligent compilation acceleration. **Automa
 - **Significantly reduces build time**
 - Supports Kotlin / Java / KAPT / KSP
 - Suitable for multi-module Android projects
+- **(Optional) Auto-recovery for DEX duplicate-class failures**: on `mergeProjectDex` / `DexArchiveMergerException`, automatically runs `clean` and retries the same task list (see below; enabled when you `apply` the script)
+
+---
+
+## 📅 Changelog
+
+### 2026-03-28
+
+**What changed**
+
+- **`build-optimization.gradle` (robustness & behavior)**
+  - **Cross-platform Git invocation**: on Windows uses `cmd.exe /c git ...`; on Unix invokes `git` directly.
+  - **Avoid pipe deadlocks**: stdout/stderr from Git child processes are drained on background threads as UTF-8 before `waitFor()`, so large output cannot block the pipe and hang the build.
+  - **`execGit` helper**: centralizes the above for HEAD/branch bookkeeping and multiple `git diff` calls.
+  - **Changed-module path parsing**: normalizes Windows backslash paths to `/` before splitting path segments, keeping module detection consistent with Unix and reducing incorrect “unchanged module” pruning.
+- **`dex_dup_auto_recovery.gradle` (new)**
+  - Runs only when **`apply`'d on the root project**; subprojects do not register the hook.
+  - If the build fails with a **D8 / `mergeProjectDex` duplicate-class** pattern (e.g. `DexArchiveMergerException`, `defined multiple times`, etc.), spawns a child process to run **`clean`** plus the **original task list**. Child stdout/stderr are streamed on background threads (avoids silent Daemon I/O and pipe stalls).
+  - Disable with **`-PdexDupAutoRecovery=false`** or `dexDupAutoRecovery=false` in project properties. Inner retries use `-PdexDupAutoRecoveryInner=true` to prevent recursive recovery.
+
+**Why it helps**
+
+- More reliable Git usage on **Windows CI** and when **diff output is large**; smarter pruning with consistent path handling.
+- Fewer manual **clean + rebuild** cycles when hitting transient **DEX merge duplicate-class** issues (skip `apply` or use the disable flag if unwanted).
 
 ---
 
@@ -71,27 +95,41 @@ moduleA/src/...
 
 ## 🚀 Quick Integration
 
-### 1️⃣ Copy the Script
-Copy the `build-optimization.gradle` file to your project root directory (at the same level as `settings.gradle`):
+### 1️⃣ Copy the scripts
+Copy `build-optimization.gradle` (and optionally `dex_dup_auto_recovery.gradle`) to your project root (next to `settings.gradle`):
 
 ```text
 project-root/
 ├── build-optimization.gradle
+├── dex_dup_auto_recovery.gradle   # optional: DEX duplicate-class auto-recovery
 ├── settings.gradle
 ├── app/
 └── ...
 ```
 
-### 2️⃣ Apply in Root build.gradle
+### 2️⃣ Apply in root `build.gradle`
 
-Add the following line to your root `build.gradle` file:
-
-groovy
+```groovy
 apply from: rootProject.file("build-optimization.gradle")
+```
 
-
-g
 ⚠️ **Ensure the path is correct, otherwise Gradle will fail to load the script.**
+
+### 3️⃣ (Optional) DEX duplicate-class auto-recovery — `dex_dup_auto_recovery.gradle`
+
+Typical for **CI or local builds**: when D8 fails on duplicate classes during `mergeProjectDex`, the script runs `clean` and retries the same Gradle tasks you passed on the command line.
+
+1. Place `dex_dup_auto_recovery.gradle` in the project root (as above).
+2. In root `build.gradle`, **`apply` `build-optimization.gradle` first**, then **`apply` this script**:
+
+```groovy
+apply from: rootProject.file("build-optimization.gradle")
+apply from: rootProject.file("dex_dup_auto_recovery.gradle")
+```
+
+3. **Turn off auto-recovery** when you need the first failure preserved: pass `-PdexDupAutoRecovery=false` or set `dexDupAutoRecovery=false` in `gradle.properties`.
+
+**Note**: recovery starts a **new Gradle process** for `clean` + the original `taskNames`; the exit code of that process is propagated (your outer invocation may end non-zero). If you do not want this behavior, omit `apply` for this file.
 
 ## 📂 Generated Cache Files
 
