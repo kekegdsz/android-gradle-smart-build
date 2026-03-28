@@ -1,0 +1,161 @@
+// 由根 build.gradle 与 build-optimization 一并 apply；检测到 D8 mergeProjectDex 重复类失败时自动 clean + 重跑任务
+// 关闭自动恢复：-PdexDupAutoRecovery=false
+//
+// 说明：在 Gradle Daemon 里对子进程使用 inheritIO() 往往看不到输出，且若不读 stdout/stderr 可能管道写满导致子进程卡死。
+// 下面用独立线程刷日志，便于判断卡在「启动前 / 子进程内 / waitFor 之后」。
+
+import org.gradle.BuildResult
+
+import java.nio.charset.StandardCharsets
+
+if (project != rootProject) {
+    return
+}
+
+def collectFailureText = { Throwable t ->
+    def sb = new StringBuilder()
+    def depth = 0
+    while (t != null && depth < 50) {
+        sb.append(t.class.name).append(": ").append(String.valueOf(t.message)).append('\n')
+        t = t.cause
+        depth++
+    }
+    sb.toString()
+}
+
+def isDexDuplicateClassFailure = { String text ->
+    if (text == null || text.isEmpty()) return false
+    if (text.contains('DexArchiveMergerException')) return true
+    if (text.contains('defined multiple times')
+            && (text.contains('mergeProjectDex') || text.contains('mixed_scope_dex_archive'))) return true
+    false
+}
+
+def innerProp = gradle.startParameter.projectProperties.get('dexDupAutoRecoveryInner')
+def isInnerRecoveryRun = 'true'.equalsIgnoreCase(String.valueOf(innerProp ?: ''))
+
+def resolveRecoveryDisabled = {
+    def fromCli = gradle.startParameter.projectProperties.get('dexDupAutoRecovery')
+    def v = fromCli != null ? fromCli : project.findProperty('dexDupAutoRecovery')
+    'false'.equalsIgnoreCase(String.valueOf(v ?: ''))
+}
+
+/** 后台读流，避免子进程写满管道阻塞；前缀区分 out/err */
+def startDrain = { InputStream is, String prefix ->
+    Thread.start {
+        BufferedReader br = null
+        try {
+            br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))
+            String line
+            while ((line = br.readLine()) != null) {
+                println "${prefix}${line}"
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            try {
+                br?.close()
+            } catch (Throwable ignored2) {
+            }
+            try {
+                is?.close()
+            } catch (Throwable ignored3) {
+            }
+        }
+    }
+}
+
+gradle.buildFinished { BuildResult result ->
+    if (resolveRecoveryDisabled()) return
+    if (isInnerRecoveryRun) return
+    if (result.failure == null) return
+
+    def txt = collectFailureText(result.failure)
+    if (!isDexDuplicateClassFailure(txt)) return
+
+    def tasks = gradle.startParameter.taskNames
+    if (tasks == null || tasks.isEmpty()) return
+
+    def rootDir = rootProject.rootDir
+    def gradlewFile = new File(rootDir, 'gradlew')
+    def gradlewBat = new File(rootDir, 'gradlew.bat')
+    def isWin = System.getProperty('os.name', '').toLowerCase().contains('windows')
+    if (isWin && !gradlewBat.exists()) {
+        println '[dex-dup-recover] 未找到 gradlew.bat，跳过自动恢复'
+        return
+    }
+    if (!isWin && !gradlewFile.exists()) {
+        println '[dex-dup-recover] 未找到 gradlew，跳过自动恢复'
+        return
+    }
+
+    println ''
+    println '========== DEX 重复类 / mergeProjectDex 失败：正在自动 clean 并全量重试（本轮无需手动介入）=========='
+
+    def cmd = new ArrayList<String>()
+    if (isWin) {
+        cmd.add('cmd.exe')
+        cmd.add('/c')
+        cmd.add(gradlewBat.absolutePath)
+    } else {
+        cmd.add(gradlewFile.absolutePath)
+    }
+    cmd.add('-PdexDupAutoRecoveryInner=true')
+    cmd.add('clean')
+    cmd.addAll(tasks)
+
+    println "[dex-dup-recover] ① 即将启动子进程（若停在这里说明尚未 fork）"
+    println "[dex-dup-recover] workingDir=${rootDir.absolutePath}"
+    println "[dex-dup-recover] command=${cmd.collect { it.contains(' ') ? '"' + it + '"' : it }.join(' ')}"
+    System.out.flush()
+
+    def pb = new ProcessBuilder(cmd)
+    pb.directory(rootDir)
+    // 不用 inheritIO：Daemon 下常无输出且易死锁
+
+    Process process
+    try {
+        process = pb.start()
+    } catch (Throwable e) {
+        println "[dex-dup-recover] ② 启动子进程失败: ${e.class.name}: ${e.message}"
+        System.out.flush()
+        return
+    }
+
+    long pid = -1L
+    try {
+        pid = process.pid()
+    } catch (Throwable ignored) {
+    }
+    println "[dex-dup-recover] ③ 子进程已启动${pid >= 0 ? " pid=${pid}" : ''}，正在接管 stdout/stderr…"
+    System.out.flush()
+
+    def tOut = startDrain(process.inputStream, '[dex-dup-recover][out] ')
+    def tErr = startDrain(process.errorStream, '[dex-dup-recover][err] ')
+
+    println '[dex-dup-recover] ④ 进入 waitFor()；若长时间只有本行而无 [out]/[err]，说明卡在 Gradle 配置/下载或子进程未刷日志'
+    System.out.flush()
+
+    int code
+    try {
+        code = process.waitFor()
+    } catch (Throwable e) {
+        println "[dex-dup-recover] waitFor 异常: ${e.class.name}: ${e.message}"
+        System.out.flush()
+        process.destroyForcibly()
+        return
+    }
+
+    println "[dex-dup-recover] ⑤ waitFor 已返回 exitCode=${code}，等待日志线程收尾…"
+    System.out.flush()
+    try {
+        tOut.join(600_000)
+        tErr.join(600_000)
+    } catch (Throwable ignored) {
+    }
+    println "[dex-dup-recover] ⑥ 日志线程已结束"
+    System.out.flush()
+
+    println "========== 自动恢复构建结束，退出码: ${code} =========="
+    System.out.flush()
+    System.exit(code)
+}

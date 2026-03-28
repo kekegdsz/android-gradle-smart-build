@@ -2,10 +2,66 @@
 // =======================================================
 //  Global One-time State (Root Only)
 // =======================================================
+import java.nio.charset.StandardCharsets
+
 ext._gitHeadChanged = false
 ext._gitBranchChanged = false
 ext._gitStateInited = false
 ext._taskGraphInstalled = false
+
+
+// =======================================================
+//  Git 子进程（跨平台 + 避免管道填满导致 waitFor 死锁）
+// =======================================================
+
+/** Windows 无 bash：用 cmd /c 拉起 git；Unix 直接 git。 */
+def createGitProcess = { List<String> gitArgs, File workDir ->
+    def isWindows = System.getProperty("os.name", "").toLowerCase().contains("windows")
+    if (isWindows) {
+        def cmdLine = (["git"] + gitArgs).collect { String a ->
+            if (a.contains(" ") || a.contains("\t")) {
+                "\"" + a.replace('"', '\\"') + "\""
+            } else {
+                a
+            }
+        }.join(" ")
+        return ["cmd.exe", "/c", cmdLine].execute(null, workDir)
+    }
+    return (["git"] + gitArgs).execute(null, workDir)
+}
+
+def drainUtf8Stream = { InputStream is, StringBuilder sb ->
+    BufferedReader br = null
+    try {
+        br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))
+        String line
+        while ((line = br.readLine()) != null) {
+            sb.append(line).append('\n')
+        }
+    } catch (Throwable ignored) {
+    } finally {
+        try {
+            br?.close()
+        } catch (Throwable ignored2) {}
+    }
+}
+
+/** 用 BufferedReader 在后台读 stdout/stderr，再 waitFor，避免输出过多堵塞管道 */
+def execGit = { List<String> gitArgs, File workDir ->
+    def outBuf = new StringBuilder()
+    def errBuf = new StringBuilder()
+    Process p = createGitProcess(gitArgs, workDir)
+    Thread outThread = Thread.start {
+        drainUtf8Stream(p.inputStream, outBuf)
+    }
+    Thread errThread = Thread.start {
+        drainUtf8Stream(p.errorStream, errBuf)
+    }
+    int code = p.waitFor()
+    outThread.join(60_000)
+    errThread.join(60_000)
+    return [exitValue: code, out: outBuf.toString(), err: errBuf.toString()]
+}
 
 
 // =======================================================
@@ -16,10 +72,11 @@ def initGitStateOnce = {
     if (rootProject.ext._gitStateInited) return
     rootProject.ext._gitStateInited = true
 
+    def gitDir = rootProject.rootDir
+
     try {
-        def p = ["bash", "-c", "git rev-parse HEAD"].execute()
-        p.waitFor()
-        def currentHead = p.in.text.trim()
+        def r = execGit(["rev-parse", "HEAD"], gitDir)
+        def currentHead = r.exitValue == 0 ? r.out.trim() : ""
 
         def recordFile = new File(rootProject.buildDir, "last_git_head.txt")
         def lastHead = recordFile.exists() ? recordFile.text.trim() : ""
@@ -33,9 +90,8 @@ def initGitStateOnce = {
     }
 
     try {
-        def p = ["bash", "-c", "git rev-parse --abbrev-ref HEAD"].execute()
-        p.waitFor()
-        def currentBranch = p.in.text.trim()
+        def r = execGit(["rev-parse", "--abbrev-ref", "HEAD"], gitDir)
+        def currentBranch = r.exitValue == 0 ? r.out.trim() : ""
 
         def recordFile = new File(rootProject.buildDir, "last_git_branch.txt")
         def lastBranch = recordFile.exists() ? recordFile.text.trim() : ""
@@ -169,9 +225,12 @@ if (project == rootProject && !ext._taskGraphInstalled) {
         // ---------- Git Changed Modules ----------
         def changedModules = [] as Set<String>
 
+        // Git 在 Windows 上可能输出反斜杠路径，需与 Unix 一样按「路径段」解析模块
         def processChangedFiles = { String filePath ->
-            if (!filePath.contains("/")) return
-            def parts = filePath.split("/")
+            if (filePath == null || filePath.isEmpty()) return
+            def normalized = filePath.replace('\\', '/')
+            if (!normalized.contains("/")) return
+            def parts = normalized.split("/")
             def moduleParts = []
             for (part in parts) {
                 if (part == "src") break
@@ -183,14 +242,15 @@ if (project == rootProject && !ext._taskGraphInstalled) {
         }
 
         [
-                "git diff --name-only HEAD~1..HEAD",
-                "git diff --name-only",
-                "git diff --name-only --cached"
-        ].each { cmd ->
+                ["diff", "--name-only", "HEAD~1..HEAD"],
+                ["diff", "--name-only"],
+                ["diff", "--name-only", "--cached"]
+        ].each { diffArgs ->
             try {
-                def p = ["bash", "-c", cmd].execute()
-                p.waitFor()
-                p.in.text.readLines().each(processChangedFiles)
+                def r = execGit(diffArgs, rootProject.rootDir)
+                if (r.exitValue == 0) {
+                    r.out.readLines().each(processChangedFiles)
+                }
             } catch (ignored) {}
         }
 
