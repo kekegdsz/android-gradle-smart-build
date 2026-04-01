@@ -11,6 +11,7 @@
 ## ✨ 特性亮点
 
 - **Git Diff 驱动的模块级裁剪**
+- **依赖传递扩展**：下层 module 被 Git 判为变更时，凡通过 `implementation` / `api` / `compileOnly` 依赖它的 Android module 也会加入编译集合，减轻「只改库公开 API、上层源文件未动」的漏编风险；可用 `-PsmartBuildExpandDependents=false` 关闭
 - **Fail-Safe 机制**：裁剪失败 → 下次自动全量编译
 - **零侵入**：无需改任何模块源码
 - **显著缩短 构建时间**
@@ -31,6 +32,8 @@
   - **避免管道死锁**：对 Git 子进程的 stdout/stderr 使用独立线程按 UTF-8 消费，再 `waitFor()`，防止输出过多时管道写满导致构建挂死。
   - **统一封装 `execGit`**：上述行为集中在一处，供 HEAD/分支记录与多路 `git diff` 复用。
   - **变更模块路径解析**：将 Git 在 Windows 上可能输出的反斜杠路径规范为 `/`，再按路径段解析到 Gradle 模块名，与 Unix 行为一致，减少误判「未变更模块」。
+  - **依赖传递扩展**：在 Git 变更集合上按 Project 依赖关系做闭包扩张；关闭：`-PsmartBuildExpandDependents=false` 或 `gradle.properties` 中 `smartBuildExpandDependents=false`。
+  - **可配置项**：裁剪子串、Git diff、Kotlin/Java/Test/Android、`build/` 状态文件名等均在 **`build-optimization.gradle` 顶部 `SMART_BUILD` map** 中修改（见 §2.1）。
 - **`dex_dup_auto_recovery.gradle`（新增）**
   - 仅在**根工程** `apply` 后生效；子工程不会重复注册。
   - 构建失败且堆栈符合 **D8 / `mergeProjectDex` 重复类**（如 `DexArchiveMergerException`、`defined multiple times` 等）时，自动以子进程执行 **`clean` + 原任务列表** 全量重试；子进程 stdout/stderr 同样用后台线程刷日志，避免 Daemon 下无输出或管道阻塞。
@@ -89,7 +92,16 @@ moduleA/src/...
 
 📌 Git Changed Modules:
   :component-biz:biz-debug-tool
+
+📌 Dependent recompile (implementation / api / compileOnly):
+  :app
 ```
+
+### 3️⃣ 依赖传递扩展（可选关闭）
+
+在 Git 已识别变更模块之后，脚本会解析各 Android module 在 **`implementation` / `api` / `compileOnly`** 上的 **`ProjectDependency`**，把「依赖了变更 module」的上层 module 一并加入待编译集合（多轮传递）。**不扫盘、不算 MD5**，仅多一次配置遍历。
+
+排查异常或需对比「仅 Git 裁剪」行为时，可关闭：`-PsmartBuildExpandDependents=false`。
 
 # Android Gradle 构建优化脚本使用说明
 
@@ -119,6 +131,26 @@ apply from: rootProject.file("build-optimization.gradle")
 
 ⚠️ **确保路径正确，否则 Gradle 无法加载脚本。**
 
+### 2️⃣.1 脚本内配置 `SMART_BUILD`
+
+所有默认参数写在 **`build-optimization.gradle` 文件最上方**的 **`def SMART_BUILD = [ ... ]`** 里，按项目需要直接改数组/字符串即可，**不必**在根 `build.gradle` 再配一份。
+
+| 配置键 | 类型 | 含义 |
+|--------|------|------|
+| `skipTaskNameSubstrings` | `List<String>` | 任务名包含任一则禁用 |
+| `pruneTaskPathSubstrings` | `List<String>` | `task.path` 包含任一则参与「未变更模块」裁剪 |
+| `assembleTaskNamePrefixes` | `List<String>` | 任务名以前缀匹配则启用裁剪逻辑 |
+| `gitDiffArgLists` | `List<List<String>>` | 多组 `git` 参数 |
+| `modulePathStopSegment` | `String` | 解析模块路径时在遇此目录名处停止（默认 `src`） |
+| `dependentResolutionConfigurations` | `List<String>` | 依赖传递扫描的 configuration 名 |
+| `kotlinCompileTaskClassNames` | `List<String>` | Kotlin 编译 task 类名（空列表则跳过 Kotlin 调优） |
+| `kotlinJvmTarget` / `kotlinFreeCompilerArgs` / `kotlinAllWarningsAsErrors` / `kotlinSuppressWarnings` / `kotlinIncremental` | — | Kotlin 选项 |
+| `javaCompileIncremental` / `javaCompileFork` / `javaCompileMemoryMax` | — | Java 编译 |
+| `testForkEvery` / `testMaxParallelForksDivisor` | — | 单测并行（forks = processors / divisor） |
+| `androidAaptCruncherEnabled` | `Boolean` | 是否开启 aapt cruncher（默认 `false`） |
+| `gitStreamJoinTimeoutMs` | `Long` | Git 子进程日志线程 join 超时 |
+| `trimFailedFlagFileName` / `gitHeadRecordFileName` / `gitBranchRecordFileName` | `String` | `build/` 下状态文件名 |
+
 ### 3️⃣（可选）DEX 重复类自动恢复 — `dex_dup_auto_recovery.gradle`
 
 适用于 **CI 或本机构建**：当 D8 合并 dex 报「类重复 / `mergeProjectDex`」时自动 `clean` 并重跑本次传入的 Gradle 任务。
@@ -139,12 +171,14 @@ apply from: rootProject.file("dex_dup_auto_recovery.gradle")
 
 | 文件 | 作用 |
 |------|------|
-| `build/last_git_head.txt` | 记录上一次 Git HEAD，用于判断代码是否变化 |
-| `build/last_git_branch.txt` | 记录上一次 Git 分支，用于判断分支是否切换 |
-| `build/last_trim_failed.flag` | 记录上一次裁剪构建是否失败，若存在则下次自动全量编译 |
+| `build/last_git_head.txt` | 记录上一次 Git HEAD（文件名见脚本内 `SMART_BUILD.gitHeadRecordFileName`） |
+| `build/last_git_branch.txt` | 记录上一次 Git 分支（`gitBranchRecordFileName`） |
+| `build/last_trim_failed.flag` | 裁剪失败标记（`trimFailedFlagFileName`） |
 
 ## 💡 提示
 这些文件可安全删除，脚本会在下一次构建时重新生成，不影响功能。
+
+若依赖传递导致编译范围比预期大，可使用 **`-PsmartBuildExpandDependents=false`**（或 `gradle.properties` 中 `smartBuildExpandDependents=false`）暂时关闭。
 
 ## License
 ```text

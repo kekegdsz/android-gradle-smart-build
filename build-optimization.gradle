@@ -4,10 +4,85 @@
 // =======================================================
 import java.nio.charset.StandardCharsets
 
+import org.gradle.api.artifacts.ProjectDependency
+
 ext._gitHeadChanged = false
 ext._gitBranchChanged = false
 ext._gitStateInited = false
 ext._taskGraphInstalled = false
+
+
+// =======================================================
+//  可调参数：只改本脚本即可（勿在根 build.gradle 再维护一份）
+//  键说明见仓库 README「脚本内配置」
+// =======================================================
+
+def SMART_BUILD = [
+        // ---------- TaskGraph 裁剪 ----------
+        skipTaskNameSubstrings            : [
+                'lint',
+                'test',
+                'connectedAndroidTest',
+                'kaptTestKotlin',
+                'kaptAndroidTestKotlin',
+                'testDebugUnitTest'
+        ],
+        pruneTaskPathSubstrings           : [
+                'compileDebug',
+                'kaptDebug',
+                'kspDebug'
+        ],
+        assembleTaskNamePrefixes          : ['assemble'],
+        gitDiffArgLists                   : [
+                ['diff', '--name-only', 'HEAD~1..HEAD'],
+                ['diff', '--name-only'],
+                ['diff', '--name-only', '--cached']
+        ],
+        modulePathStopSegment             : 'src',
+
+        // ---------- 依赖传递扩展 ----------
+        dependentResolutionConfigurations : ['implementation', 'api', 'compileOnly'],
+
+        // ---------- Kotlin ----------
+        kotlinCompileTaskClassNames       : [
+                'org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile',
+                'org.jetbrains.kotlin.gradle.tasks.KotlinCompile'
+        ],
+        kotlinJvmTarget                   : '1.8',
+        kotlinFreeCompilerArgs            : ['-Xjsr305=strict'],
+        kotlinAllWarningsAsErrors         : false,
+        kotlinSuppressWarnings            : true,
+        kotlinIncremental                 : true,
+
+        // ---------- Java ----------
+        javaCompileIncremental            : true,
+        javaCompileFork                   : true,
+        javaCompileMemoryMax              : '1g',
+
+        // ---------- Test（maxParallelForks = processors / testMaxParallelForksDivisor）----------
+        testForkEvery                     : 100,
+        testMaxParallelForksDivisor       : 2,
+
+        // ---------- Android（true 才开启 aapt cruncher）----------
+        androidAaptCruncherEnabled        : false,
+
+        // ---------- Git 子进程 ----------
+        gitStreamJoinTimeoutMs            : 60_000L,
+
+        // ---------- 状态文件（相对 rootProject.buildDir）----------
+        trimFailedFlagFileName            : 'last_trim_failed.flag',
+        gitHeadRecordFileName             : 'last_git_head.txt',
+        gitBranchRecordFileName           : 'last_git_branch.txt',
+] as Map<String, Object>
+
+def ensureSmartBuildConfig = {
+    if (rootProject.ext.has('_smartBuildMerged')) {
+        return rootProject.ext._smartBuildMerged as Map
+    }
+    def merged = new LinkedHashMap<String, Object>(SMART_BUILD)
+    rootProject.ext._smartBuildMerged = merged
+    return merged
+}
 
 
 // =======================================================
@@ -24,7 +99,7 @@ def createGitProcess = { List<String> gitArgs, File workDir ->
             } else {
                 a
             }
-        }.join(" ")
+        }.join(' ')
         return ["cmd.exe", "/c", cmdLine].execute(null, workDir)
     }
     return (["git"] + gitArgs).execute(null, workDir)
@@ -48,6 +123,10 @@ def drainUtf8Stream = { InputStream is, StringBuilder sb ->
 
 /** 用 BufferedReader 在后台读 stdout/stderr，再 waitFor，避免输出过多堵塞管道 */
 def execGit = { List<String> gitArgs, File workDir ->
+    def cfg = ensureSmartBuildConfig()
+    long joinMs = 60_000L
+    def t = cfg.gitStreamJoinTimeoutMs
+    if (t instanceof Number) joinMs = (t as Number).longValue()
     def outBuf = new StringBuilder()
     def errBuf = new StringBuilder()
     Process p = createGitProcess(gitArgs, workDir)
@@ -58,8 +137,8 @@ def execGit = { List<String> gitArgs, File workDir ->
         drainUtf8Stream(p.errorStream, errBuf)
     }
     int code = p.waitFor()
-    outThread.join(60_000)
-    errThread.join(60_000)
+    outThread.join(joinMs)
+    errThread.join(joinMs)
     return [exitValue: code, out: outBuf.toString(), err: errBuf.toString()]
 }
 
@@ -72,13 +151,14 @@ def initGitStateOnce = {
     if (rootProject.ext._gitStateInited) return
     rootProject.ext._gitStateInited = true
 
+    def cfg = ensureSmartBuildConfig()
     def gitDir = rootProject.rootDir
 
     try {
         def r = execGit(["rev-parse", "HEAD"], gitDir)
         def currentHead = r.exitValue == 0 ? r.out.trim() : ""
 
-        def recordFile = new File(rootProject.buildDir, "last_git_head.txt")
+        def recordFile = new File(rootProject.buildDir, String.valueOf(cfg.gitHeadRecordFileName))
         def lastHead = recordFile.exists() ? recordFile.text.trim() : ""
 
         recordFile.parentFile.mkdirs()
@@ -93,7 +173,7 @@ def initGitStateOnce = {
         def r = execGit(["rev-parse", "--abbrev-ref", "HEAD"], gitDir)
         def currentBranch = r.exitValue == 0 ? r.out.trim() : ""
 
-        def recordFile = new File(rootProject.buildDir, "last_git_branch.txt")
+        def recordFile = new File(rootProject.buildDir, String.valueOf(cfg.gitBranchRecordFileName))
         def lastBranch = recordFile.exists() ? recordFile.text.trim() : ""
 
         recordFile.parentFile.mkdirs()
@@ -105,6 +185,58 @@ def initGitStateOnce = {
     }
 }
 
+// =======================================================
+//  依赖传递扩展：Git 变更 module 的 Project 依赖闭包扩张
+//  关闭：-PsmartBuildExpandDependents=false 或 gradle.properties
+// =======================================================
+
+def collectAndroidProjectsForSmartBuild = { Project root ->
+    def list = []
+    root.allprojects.each { Project p ->
+        if (p.plugins.hasPlugin('com.android.application') ||
+                p.plugins.hasPlugin('com.android.library')) {
+            list.add(p)
+        }
+    }
+    list
+}
+
+/** dependencyProject.path -> 直接依赖该工程的 consumer.path 集合 */
+def buildSmartBuildDependentsMap = { List<Project> androidProjects, List<String> depConfigs ->
+    def dependents = [:] as Map<String, Set<String>>
+    androidProjects.each { Project consumer ->
+        depConfigs.each { String confName ->
+            def conf = consumer.configurations.findByName(confName)
+            if (conf == null) return
+            conf.dependencies.withType(ProjectDependency).each { ProjectDependency pd ->
+                def depPath = pd.dependencyProject.path
+                if (!dependents.containsKey(depPath)) {
+                    dependents[depPath] = [] as Set<String>
+                }
+                dependents[depPath].add(consumer.path)
+            }
+        }
+    }
+    dependents
+}
+
+def expandChangedModulesWithDependents = { Set<String> changed, Map<String, Set<String>> dependents ->
+    def expanded = new LinkedHashSet<String>(changed)
+    def queue = new LinkedHashSet<String>(changed)
+    while (!queue.isEmpty()) {
+        def it = queue.iterator()
+        def m = it.next()
+        it.remove()
+        dependents.get(m)?.each { String consumer ->
+            if (!expanded.contains(consumer)) {
+                expanded.add(consumer)
+                queue.add(consumer)
+            }
+        }
+    }
+    expanded
+}
+
 
 // =======================================================
 //  Project-wide Build Optimization
@@ -113,44 +245,56 @@ def initGitStateOnce = {
 allprojects { Project p ->
 
     afterEvaluate {
+        def cfg = ensureSmartBuildConfig()
 
         // ---------- Kotlin ----------
-        def kotlinTaskClassNames = [
-                'org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile',
-                'org.jetbrains.kotlin.gradle.tasks.KotlinCompile'
-        ]
+        def kotlinNames = cfg.kotlinCompileTaskClassNames
+        if (kotlinNames instanceof List && !kotlinNames.isEmpty()) {
+            Class kotlinCompileClass = null
+            for (name in kotlinNames) {
+                if (!(name instanceof CharSequence)) continue
+                try {
+                    kotlinCompileClass = Class.forName(name.toString())
+                    break
+                } catch (Throwable ignored) {}
+            }
 
-        Class kotlinCompileClass = null
-        for (name in kotlinTaskClassNames) {
-            try {
-                kotlinCompileClass = Class.forName(name)
-                break
-            } catch (Throwable ignored) {}
-        }
-
-        if (kotlinCompileClass != null) {
-            tasks.withType(kotlinCompileClass).configureEach { task ->
-                task.kotlinOptions {
-                    jvmTarget = "1.8"
-                    freeCompilerArgs += ["-Xjsr305=strict"]
-                    allWarningsAsErrors = false
-                    suppressWarnings = true
+            if (kotlinCompileClass != null) {
+                tasks.withType(kotlinCompileClass).configureEach { task ->
+                    task.kotlinOptions {
+                        jvmTarget = String.valueOf(cfg.kotlinJvmTarget ?: '1.8')
+                        def fca = cfg.kotlinFreeCompilerArgs
+                        if (fca instanceof List && !fca.isEmpty()) {
+                            freeCompilerArgs += fca.findAll { it != null }.collect { String.valueOf(it) }
+                        }
+                        allWarningsAsErrors = Boolean.TRUE == cfg.kotlinAllWarningsAsErrors
+                        suppressWarnings = !(Boolean.FALSE == cfg.kotlinSuppressWarnings)
+                    }
+                    task.incremental = !(Boolean.FALSE == cfg.kotlinIncremental)
                 }
-                task.incremental = true
             }
         }
 
         // ---------- Java ----------
         tasks.withType(JavaCompile).configureEach {
-            options.incremental = true
-            options.fork = true
-            options.forkOptions.memoryMaximumSize = "1g"
+            options.incremental = !(Boolean.FALSE == cfg.javaCompileIncremental)
+            options.fork = !(Boolean.FALSE == cfg.javaCompileFork)
+            def mem = cfg.javaCompileMemoryMax
+            if (mem != null) options.forkOptions.memoryMaximumSize = String.valueOf(mem)
         }
 
         // ---------- Test ----------
         tasks.withType(Test).configureEach {
-            maxParallelForks = Runtime.runtime.availableProcessors().intdiv(2) ?: 1
-            forkEvery = 100
+            def div = cfg.testMaxParallelForksDivisor
+            int forks = 1
+            if (div instanceof Number && (div as Number).intValue() > 0) {
+                forks = Runtime.runtime.availableProcessors().intdiv((div as Number).intValue()) ?: 1
+            } else {
+                forks = Runtime.runtime.availableProcessors().intdiv(2) ?: 1
+            }
+            maxParallelForks = forks
+            def fe = cfg.testForkEvery
+            forkEvery = fe instanceof Number ? (fe as Number).intValue() : 100
         }
 
         // ---------- Android ----------
@@ -159,7 +303,7 @@ allprojects { Project p ->
 
             android {
                 aaptOptions {
-                    cruncherEnabled = false
+                    cruncherEnabled = Boolean.TRUE == cfg.androidAaptCruncherEnabled
                 }
             }
         }
@@ -174,13 +318,23 @@ allprojects { Project p ->
 if (project == rootProject && !ext._taskGraphInstalled) {
     ext._taskGraphInstalled = true
 
-    def trimFailFlagFile = new File(rootProject.buildDir, "last_trim_failed.flag")
-
     gradle.taskGraph.whenReady { graph ->
+
+        def cfg = ensureSmartBuildConfig()
+        def trimFailFlagFile = new File(rootProject.buildDir, String.valueOf(cfg.trimFailedFlagFileName))
 
         initGitStateOnce()
 
-        if (!graph.allTasks.any { it.name.startsWith("assemble") }) return
+        def assemblePrefixes = cfg.assembleTaskNamePrefixes
+        def hasAssemble = false
+        if (assemblePrefixes instanceof List) {
+            hasAssemble = graph.allTasks.any { task ->
+                assemblePrefixes.any { p ->
+                    p instanceof CharSequence && task.name.startsWith(p.toString())
+                }
+            }
+        }
+        if (!hasAssemble) return
 
         def lastTrimFailed = trimFailFlagFile.exists()
 
@@ -200,32 +354,25 @@ if (project == rootProject && !ext._taskGraphInstalled) {
             return
         }
 
-        // Assume pruning will fail initially, clear on success
         trimFailFlagFile.parentFile.mkdirs()
         trimFailFlagFile.text = "failed"
 
         // ---------- Skip Unrelated Tasks ----------
-        def skipTasks = [
-                "lint",
-                "test",
-                "connectedAndroidTest",
-                "kaptTestKotlin",
-                "kaptAndroidTestKotlin",
-                "testDebugUnitTest"
-        ]
-
-        graph.allTasks.each { task ->
-            skipTasks.each { skip ->
-                if (task.name.contains(skip)) {
-                    task.enabled = false
+        def skipSubs = cfg.skipTaskNameSubstrings
+        if (skipSubs instanceof List) {
+            graph.allTasks.each { task ->
+                skipSubs.each { skip ->
+                    if (skip instanceof CharSequence && task.name.contains(skip.toString())) {
+                        task.enabled = false
+                    }
                 }
             }
         }
 
         // ---------- Git Changed Modules ----------
         def changedModules = [] as Set<String>
+        def stopSeg = cfg.modulePathStopSegment != null ? String.valueOf(cfg.modulePathStopSegment) : 'src'
 
-        // Git 在 Windows 上可能输出反斜杠路径，需与 Unix 一样按「路径段」解析模块
         def processChangedFiles = { String filePath ->
             if (filePath == null || filePath.isEmpty()) return
             def normalized = filePath.replace('\\', '/')
@@ -233,7 +380,7 @@ if (project == rootProject && !ext._taskGraphInstalled) {
             def parts = normalized.split("/")
             def moduleParts = []
             for (part in parts) {
-                if (part == "src") break
+                if (part == stopSeg) break
                 moduleParts << part
             }
             if (!moduleParts.isEmpty()) {
@@ -241,30 +388,60 @@ if (project == rootProject && !ext._taskGraphInstalled) {
             }
         }
 
-        [
-                ["diff", "--name-only", "HEAD~1..HEAD"],
-                ["diff", "--name-only"],
-                ["diff", "--name-only", "--cached"]
-        ].each { diffArgs ->
+        def diffLists = cfg.gitDiffArgLists
+        if (diffLists instanceof List) {
+            diffLists.each { diffArgs ->
+                if (!(diffArgs instanceof List) || diffArgs.isEmpty()) return
+                try {
+                    def args = diffArgs.collect { it == null ? '' : String.valueOf(it) }
+                    def r = execGit(args, rootProject.rootDir)
+                    if (r.exitValue == 0) {
+                        r.out.readLines().each(processChangedFiles)
+                    }
+                } catch (ignored) {}
+            }
+        }
+
+        def gitChangedPaths = new LinkedHashSet<String>(changedModules)
+        def expandProp = rootProject.findProperty('smartBuildExpandDependents')
+        def expandDependents = !(expandProp != null && 'false'.equalsIgnoreCase(String.valueOf(expandProp)))
+        def depConfNames = cfg.dependentResolutionConfigurations
+        if (expandDependents && !gitChangedPaths.isEmpty() && depConfNames instanceof List && !depConfNames.isEmpty()) {
             try {
-                def r = execGit(diffArgs, rootProject.rootDir)
-                if (r.exitValue == 0) {
-                    r.out.readLines().each(processChangedFiles)
-                }
-            } catch (ignored) {}
+                def names = depConfNames.findAll { it instanceof CharSequence }.collect { it.toString() }
+                def androidProjs = collectAndroidProjectsForSmartBuild(rootProject)
+                def depMap = buildSmartBuildDependentsMap(androidProjs, names)
+                def expanded = expandChangedModulesWithDependents(gitChangedPaths, depMap)
+                changedModules.clear()
+                changedModules.addAll(expanded)
+            } catch (Throwable ignored) {
+            }
         }
 
         println "📌 Git Changed Modules:"
-        changedModules.each { println "  $it" }
+        gitChangedPaths.each { println "  $it" }
         println ""
+        def addedByDeps = new LinkedHashSet<String>(changedModules)
+        addedByDeps.removeAll(gitChangedPaths)
+        if (!addedByDeps.isEmpty()) {
+            def depLabel = (depConfNames instanceof List) ? depConfNames.join(' / ') : 'implementation / api / compileOnly'
+            println "📌 Dependent recompile (${depLabel}):"
+            addedByDeps.each { println "  $it" }
+            println ""
+        }
 
         // ---------- Compilation Task Pruning ----------
-        graph.allTasks.each { task ->
-            if (!task.path.contains(":compileDebug")
-                    && !task.path.contains(":kaptDebug")
-                    && !task.path.contains(":kspDebug")) return
+        def pruneSubs = cfg.pruneTaskPathSubstrings
+        if (!(pruneSubs instanceof List) || pruneSubs.isEmpty()) return
 
-            def modulePath = task.path.substring(0, task.path.lastIndexOf(":"))
+        graph.allTasks.each { task ->
+            def path = task.path
+            def matchPrune = pruneSubs.any { sub ->
+                sub instanceof CharSequence && path.contains(sub.toString())
+            }
+            if (!matchPrune) return
+
+            def modulePath = path.substring(0, path.lastIndexOf(":"))
             def isChanged = changedModules.any { modulePath.startsWith(it) }
 
             if (!isChanged) {
@@ -275,12 +452,9 @@ if (project == rootProject && !ext._taskGraphInstalled) {
         }
     }
 
-    // ===================================================
-    //  Build Finished Callback (Determine Rollback)
-    // ===================================================
-
     gradle.buildFinished { result ->
-        def flag = new File(rootProject.buildDir, "last_trim_failed.flag")
+        def cfg = ensureSmartBuildConfig()
+        def flag = new File(rootProject.buildDir, String.valueOf(cfg.trimFailedFlagFileName))
         if (result.failure == null) {
             if (flag.exists()) {
                 flag.delete()
